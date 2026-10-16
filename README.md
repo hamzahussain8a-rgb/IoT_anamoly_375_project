@@ -328,22 +328,7 @@ Be honest about these when presenting the work:
 - The dataset is a sample (50,000 unique flows), not the full NF-ToN-IoT-v2, and is balanced 50/50, which is **not** the real-world attack rate (attacks are normally rare).
 
 ---
-
-## 9. Ideas for next steps
-
-Good tasks for teammates:
-
-1. **Try other unsupervised / one-class models** on the same files and compare using the same validation/test protocol: One-Class SVM, Local Outlier Factor, Autoencoder, Elliptic Envelope, GMM.
-2. **Feature engineering:** ratios (e.g. in/out bytes), flows per second, flag combinations. Also try dropping features rather than adding them.
-3. **Per-attack-type analysis:** use `diagnose.py` as a template to study why xss, injection and scanning are missed.
-4. **Better thresholding:** pick the threshold with a cost-aware metric or a target false-alarm rate instead of `contamination`.
-5. **Repeat with multiple random seeds** and report mean ± standard deviation.
-6. **Semi-supervised comparison:** a supervised classifier (e.g. Random Forest) as an upper bound to show how much the "no attack labels" constraint costs.
-7. **Plots for the report:** ROC curve, score distributions (normal vs attack), confusion-matrix heatmap, per-attack bar chart.
-
----
-
-## 10. Troubleshooting / FAQ
+## 9. Troubleshooting / FAQ
 
 **`FileNotFoundError: ...data/processed/train_normal.csv`**
 The CSVs must be inside `data/processed/` next to the scripts (see [section 3](#3-project-structure)).
