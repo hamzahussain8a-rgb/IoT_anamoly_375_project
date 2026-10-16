@@ -14,8 +14,7 @@ Detecting malicious IoT network traffic with an **Isolation Forest** that is tra
 6. [Script-by-script guide](#6-script-by-script-guide)
 7. [Results](#7-results)
 8. [Interpretation and known limitations](#8-interpretation-and-known-limitations)
-9. [Ideas for next steps](#9-ideas-for-next-steps)
-10. [Troubleshooting / FAQ](#10-troubleshooting--faq)
+9. [Troubleshooting / FAQ](#10-troubleshooting--faq)
 
 ---
 
