@@ -1,0 +1,4 @@
+Model,Threshold (train pct),Precision,Recall,F1,Accuracy,Balanced acc,ROC-AUC,FP,FN,Train time (s),Inference time (s),Model size (KB)
+autoencoder,75,0.7131,0.6318,0.67,0.6888,0.6888,0.7489,1589,2301,,0.423,147.4
+isolation_forest,85,0.6967,0.3474,0.4636,0.5981,0.5981,0.6046,945,4079,,0.195,29556.2
+ocsvm,90,0.6967,0.2202,0.3346,0.5622,0.5622,0.4864,599,4874,9.27,3.921,1352.4
