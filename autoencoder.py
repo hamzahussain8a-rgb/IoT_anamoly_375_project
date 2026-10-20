@@ -1,242 +1,371 @@
+
 """
-autoencoder.py-Member 2 Part
-Autoencoder trained on normal traffic only.The reconstruction error (MSE) is
-the anomaly score, and the threshold is a percentile of the errors on held-out
-normal data.
-Input:data/processed/train_normal.csv, test_mixed.csv, test_attack_types.csv
-Output:outputs/ (scores, model, threshold, metrics tables, loss plot)
-Run:python autoencoder.py
+autoencoder.py
+
+Train an Autoencoder using normal IoT traffic only.
+Use normal validation data to set the anomaly threshold.
+Evaluate on the same final test split as isolation_forest.py.
 """
 
-import json
-import os
-import random
-import time
+from pathlib import Path
 
-import matplotlib
-matplotlib.use("Agg")              #save plots to a file,no window needed
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from sklearn.metrics import (accuracy_score, f1_score, precision_score,
-                             recall_score, roc_auc_score)
+
 from sklearn.model_selection import train_test_split
-from tensorflow import keras #type:ignore
-from tensorflow.keras import layers #type:ignore
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    roc_auc_score,
+    confusion_matrix,
+    classification_report,
+)
+
+from tensorflow.keras import Model #type:ignore
+from tensorflow.keras.layers import Input, Dense #type:ignore
+from tensorflow.keras.callbacks import EarlyStopping #type:ignore
 
 
-#Settings
 
-SEED = 42                      #same results every run
-THRESHOLD_PERCENTILE = 95      #chosen threshold (the sweep below tries 95-99)
-EPOCHS = 300                  #maximum epochs (early stopping usually ends sooner)
+#1.Settings
+
+
+SEED = 42
+THRESHOLD_PERCENTILE = 95
+THRESHOLD_PERCENTILES = [95, 96, 97, 98, 99]
+
+EPOCHS = 300
 BATCH_SIZE = 64
-PATIENCE = 15                  #early stopping: epochs to wait for improvement
-VAL_FRACTION = 0.1             #share of normal training data held out for validation
+PATIENCE = 15
+VAL_FRACTION = 0.10
 
-TRAIN_PATH = "data/processed/train_normal.csv"
-TEST_PATH = "data/processed/test_mixed.csv"
-TYPES_PATH = "data/processed/test_attack_types.csv"
-OUT_DIR = "outputs"
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data" / "processed"
+OUTPUT_DIR = BASE_DIR / "outputs"
 
-random.seed(SEED)
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
 np.random.seed(SEED)
-tf.random.set_seed(SEED)
-
-
-#1.Load the data Member 1 prepared
-
-def load_data():
-    train_df = pd.read_csv(TRAIN_PATH)
-    test_df = pd.read_csv(TEST_PATH)
-
-    #Every column except the label is a feature.The model never sees 'Label'
-    feature_cols = [c for c in train_df.columns if c != "Label"]
-    missing = [c for c in feature_cols if c not in test_df.columns]
-    if missing:
-        raise ValueError(f"Test file is missing training features: {missing}")
-
-    X_train = train_df[feature_cols].to_numpy(dtype=np.float32)
-    X_test = test_df[feature_cols].to_numpy(dtype=np.float32)
-    y_test = test_df["Label"].to_numpy(dtype=int)    # 0 = normal,1 = attack
-
-    #The data is already cleaned, so just check it instead of changing it
-    if not (np.isfinite(X_train).all() and np.isfinite(X_test).all()):
-        raise ValueError("NaN or infinite values found. Ask Member 1 to check the data.")
-
-    print(f"Train: {X_train.shape} | Test: {X_test.shape}")
-    print(f"Test labels: normal={int((y_test == 0).sum())}, attack={int((y_test == 1).sum())}")
-    print(f"Train value range: {X_train.min():.2f} to {X_train.max():.2f}")
-    return X_train, X_test, y_test, feature_cols
-
-
-#2.Build the autoencoder
-
-def build_autoencoder(n_features):
-    """
-    n_features -> 64 -> 32 -> bottleneck -> 32 -> 64 -> n_features
-    The small bottleneck forces the network to learn a compact summary of
-    normal behaviour instead of copying its input
-    """
-    bottleneck = max(4, n_features // 4)
-
-    inputs = keras.Input(shape=(n_features,))
-
-    #Encoder:compress
-    x = layers.Dense(64, activation="relu")(inputs)
-    x = layers.Dense(32, activation="relu")(x)
-    code = layers.Dense(bottleneck, activation="relu", name="bottleneck")(x)
-
-    #Decoder:rebuild
-    x = layers.Dense(32, activation="relu")(code)
-    x = layers.Dense(64, activation="relu")(x)
-    outputs = layers.Dense(n_features, activation="linear")(x)  #scaled data can be negative
-
-    model = keras.Model(inputs, outputs, name="dense_autoencoder")
-    model.compile(optimizer=keras.optimizers.Adam(1e-3), loss="mse")
-    return model
+tf.keras.utils.set_random_seed(SEED)
 
 
 
-#3.Helpers:scores,metrics,per-attack report,loss plot
-
-def reconstruction_error(model, X):
-    #Mean squared error between each flow and its reconstruction
-    X_rebuilt = model.predict(X, batch_size=1024, verbose=0)
-    return np.mean(np.square(X - X_rebuilt), axis=1)
+#2.Load the shared processed datasets
 
 
-def evaluate_threshold(y_true, scores, threshold):
-    #Flag flows with score > threshold as attacks,then compute the metrics
-    y_pred = (scores > threshold).astype(int)
-    return {
-        "threshold": float(threshold),
-        "accuracy": accuracy_score(y_true, y_pred),
-        "precision": precision_score(y_true, y_pred, zero_division=0),
-        "recall": recall_score(y_true, y_pred, zero_division=0),
-        "f1": f1_score(y_true, y_pred, zero_division=0),
+print("Loading prepared datasets...")
+
+train_df = pd.read_csv(DATA_DIR / "train_normal.csv")
+test_df = pd.read_csv(DATA_DIR / "test_mixed.csv")
+
+attack_types = (
+    pd.read_csv(DATA_DIR / "test_attack_types.csv")
+    .iloc[:, 0]
+    .astype(str)
+)
+
+#Training data contains normal traffic only
+X_train_df = train_df.drop(columns=["Label"], errors="ignore")
+
+#Keep test features in exactly the same order as training features
+X_all_df = test_df.drop(columns=["Label"])[X_train_df.columns]
+
+y_all = test_df["Label"].to_numpy().astype(int)
+
+assert len(attack_types) == len(test_df), (
+    "test_attack_types.csv does not match test_mixed.csv"
+)
+
+assert set(np.unique(y_all)).issubset({0, 1}), (
+    "Labels must be 0 (normal) or 1 (attack)"
+)
+
+assert np.isfinite(X_train_df.to_numpy()).all()
+assert np.isfinite(X_all_df.to_numpy()).all()
+
+#Use the same 50/50 split as isolation_forest.py
+#The final test records are kept separate from model training
+X_val_df, X_test_df, y_val, y_test, t_val, t_test = (
+    train_test_split(
+        X_all_df,
+        y_all,
+        attack_types,
+        test_size=0.5,
+        stratify=attack_types,
+        random_state=SEED,
+    )
+)
+
+#Convert features to float32 for TensorFlow.
+X_train = X_train_df.to_numpy(dtype=np.float32)
+X_test = X_test_df.to_numpy(dtype=np.float32)
+
+print(f"Training records: {len(X_train):,}")
+print(f"Final test records: {len(X_test):,}")
+print(f"Features: {X_train.shape[1]}")
+print(f"Normal test records: {(y_test == 0).sum():,}")
+print(f"Attack test records: {(y_test == 1).sum():,}")
+
+
+
+#3.Create a normal-only validation set
+
+
+#This validation data comes from the normal training records
+#It is used for early stopping and threshold selection
+X_fit, X_val_normal = train_test_split(
+    X_train,
+    test_size=VAL_FRACTION,
+    random_state=SEED,
+)
+
+print(f"Training subset: {len(X_fit):,}")
+print(f"Normal validation subset: {len(X_val_normal):,}")
+
+
+
+#4.Build the Autoencoder
+
+
+n_features = X_train.shape[1]
+bottleneck_size = max(4, n_features // 4)
+
+inputs = Input(shape=(n_features,))
+
+encoded = Dense(64, activation="relu")(inputs)
+encoded = Dense(32, activation="relu")(encoded)
+encoded = Dense(bottleneck_size, activation="relu")(encoded)
+
+decoded = Dense(32, activation="relu")(encoded)
+decoded = Dense(64, activation="relu")(decoded)
+outputs = Dense(n_features, activation="linear")(decoded)
+
+autoencoder = Model(inputs=inputs, outputs=outputs)
+
+autoencoder.compile(
+    optimizer="adam",
+    loss="mse",
+)
+
+autoencoder.summary()
+
+
+
+#5.Train using normal traffic only
+
+
+early_stopping = EarlyStopping(
+    monitor="val_loss",
+    patience=PATIENCE,
+    restore_best_weights=True,
+)
+
+print("\nTraining Autoencoder...")
+
+history = autoencoder.fit(
+    X_fit,
+    X_fit,
+    validation_data=(X_val_normal, X_val_normal),
+    epochs=EPOCHS,
+    batch_size=BATCH_SIZE,
+    shuffle=True,
+    callbacks=[early_stopping],
+    verbose=1,
+)
+
+print(f"\nTraining stopped after {len(history.history['loss'])} epochs.")
+
+
+
+#6.Calculate reconstruction errors
+
+
+def reconstruction_errors(model, data):
+    """Calculate the mean squared reconstruction error per record."""
+    reconstructed = model.predict(data, verbose=0)
+    errors = np.mean(np.square(data - reconstructed), axis=1)
+    return errors
+
+
+#Use only normal validation records to choose the threshold
+normal_validation_errors = reconstruction_errors(
+    autoencoder, X_val_normal
+)
+
+#Final threshold is fixed at the 95th percentile
+threshold = np.percentile(
+    normal_validation_errors,
+    THRESHOLD_PERCENTILE,
+)
+
+print(f"\nSelected percentile: {THRESHOLD_PERCENTILE}")
+print(f"Anomaly threshold: {threshold:.6f}")
+
+
+
+#7.Evaluate on the shared final test set
+
+
+test_errors = reconstruction_errors(autoencoder, X_test)
+
+#Higher reconstruction error means more likely to be an attack.
+y_pred = (test_errors > threshold).astype(int)
+
+print("\n--- FINAL TEST RESULTS: AUTOENCODER ---")
+print("Accuracy :", round(accuracy_score(y_test, y_pred), 4))
+print("Precision:", round(
+    precision_score(y_test, y_pred, zero_division=0), 4
+))
+print("Recall   :", round(
+    recall_score(y_test, y_pred, zero_division=0), 4
+))
+print("F1-score :", round(
+    f1_score(y_test, y_pred, zero_division=0), 4
+))
+print("ROC-AUC  :", round(
+    roc_auc_score(y_test, test_errors), 4
+))
+
+print("\nConfusion matrix (actual rows, predicted columns):")
+print(confusion_matrix(y_test, y_pred, labels=[0, 1]))
+
+print("\nClassification report:")
+print(classification_report(
+    y_test,
+    y_pred,
+    labels=[0, 1],
+    target_names=["Normal", "Attack"],
+    zero_division=0,
+))
+
+
+
+#8.Evaluate the threshold percentiles
+
+
+threshold_rows = []
+
+for percentile in THRESHOLD_PERCENTILES:
+    current_threshold = np.percentile(
+        normal_validation_errors, percentile
+    )
+
+    current_pred = (test_errors > current_threshold).astype(int)
+
+    threshold_rows.append({
+        "percentile": percentile,
+        "threshold": float(current_threshold),
+        "accuracy": accuracy_score(y_test, current_pred),
+        "precision": precision_score(
+            y_test, current_pred, zero_division=0
+        ),
+        "recall": recall_score(
+            y_test, current_pred, zero_division=0
+        ),
+        "f1": f1_score(
+            y_test, current_pred, zero_division=0
+        ),
+        "roc_auc": roc_auc_score(y_test, test_errors),
+    })
+
+threshold_df = pd.DataFrame(threshold_rows)
+
+threshold_df.to_csv(
+    OUTPUT_DIR / "threshold_results.csv",
+    index=False,
+)
+
+print("\n--- THRESHOLD COMPARISON ---")
+print(threshold_df.round(4).to_string(index=False))
+
+
+
+#9.Results for individual attack types
+
+
+test_types = t_test.to_numpy()
+normal_mask = test_types == "Normal"
+
+per_type_rows = []
+
+for attack_type in sorted(
+    np.unique(test_types),
+    key=lambda name: (name == "Normal", name),
+):
+    mask = test_types == attack_type
+
+    correct_rate = float(
+        (y_pred[mask] == y_test[mask]).mean()
+    )
+
+    row = {
+        "type": attack_type,
+        "rows": int(mask.sum()),
+        "correct_rate": correct_rate,
     }
 
+    if attack_type != "Normal":
+        comparison_mask = mask | normal_mask
 
-def per_attack_type_report(scores, threshold, out_path):
-    #Detection rate per attack type. For 'Normal' it is the false positive rate
-    if not os.path.exists(TYPES_PATH):
-        print("test_attack_types.csv not found, skipping per-attack-type report.")
-        return
-    types = pd.read_csv(TYPES_PATH).iloc[:, 0]       # one name per test row
-    if len(types) != len(scores):
-        print("test_attack_types.csv length does not match test set, skipping.")
-        return
-    df = pd.DataFrame({"AttackType": types.values, "flagged": scores > threshold})
-    report = df.groupby("AttackType")["flagged"].agg(["sum", "count"])
-    report.columns = ["flagged", "samples"]
-    report["detection_rate"] = report["flagged"] / report["samples"]
-    report = report.sort_values("detection_rate", ascending=False)
-    report.to_csv(out_path)
-    print("\nDetection rate per attack type (Normal row = false positive rate):")
-    print(report.round(4).to_string())
+        row["roc_auc_vs_normal"] = float(
+            roc_auc_score(
+                y_test[comparison_mask],
+                test_errors[comparison_mask],
+            )
+        )
 
+    per_type_rows.append(row)
 
-def plot_loss(history, path):
-    plt.figure(figsize=(6, 4))
-    plt.plot(history.history["loss"], label="train")
-    plt.plot(history.history["val_loss"], label="validation")
-    plt.xlabel("Epoch")
-    plt.ylabel("MSE loss")
-    plt.title("Autoencoder training curve")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(path, dpi=150)
-    plt.close()
+per_type_df = pd.DataFrame(per_type_rows)
+
+per_type_df.to_csv(
+    OUTPUT_DIR / "per_attack_results_autoencoder.csv",
+    index=False,
+)
+
+print("\n--- PER-ATTACK RESULTS ---")
+print(per_type_df.round(4).to_string(index=False))
 
 
-#4.Train, choose threshold, score the test set, save everything
 
-def main():
-    os.makedirs(OUT_DIR, exist_ok=True)
+#10.Save outputs for the group
 
-    X_train, X_test, y_test, feature_cols = load_data()
+#These scores and labels refer to the same final test records
+#used by isolation_forest.py.
+np.save(
+    OUTPUT_DIR / "scores_autoencoder.npy",
+    test_errors,
+)
 
-    #Hold out some NORMAL data.It is used for early stopping and for the
-    #threshold, never for training,and the test set is used for neither
-    X_fit, X_val = train_test_split(X_train, test_size=VAL_FRACTION, random_state=SEED)
+np.save(
+    OUTPUT_DIR / "y_test.npy",
+    y_test,
+)
 
-    model = build_autoencoder(X_train.shape[1])
-    model.summary()
+np.save(
+    OUTPUT_DIR / "y_pred_autoencoder.npy",
+    y_pred,
+)
 
-    #Stop when validation loss stops improving and keep the best weights
-    early_stop = keras.callbacks.EarlyStopping(
-        monitor="val_loss", patience=PATIENCE, restore_best_weights=True)
+autoencoder.save(
+    OUTPUT_DIR / "autoencoder.keras"
+)
 
-    start = time.time()
-    history = model.fit(
-        X_fit, X_fit,                         #input and target are the same
-        validation_data=(X_val, X_val),
-        epochs=EPOCHS,
-        batch_size=BATCH_SIZE,
-        callbacks=[early_stop],
-        shuffle=True,
-        verbose=2,
-    )
-    train_time = time.time() - start
-    epochs_run = len(history.history["loss"])
-    print(f"\nTraining time: {train_time:.1f}s over {epochs_run} epochs")
+#Save training history so a loss curve can be plotted later.
+pd.DataFrame(history.history).to_csv(
+    OUTPUT_DIR / "autoencoder_training_history.csv",
+    index=False,
+)
 
-    #Errors on normal validation data show what "normal" looks like
-    val_errors = reconstruction_error(model, X_val)
-
-    #Errors on the test set are the anomaly scores Members 4 and 5 use
-    start = time.time()
-    test_scores = reconstruction_error(model, X_test)
-    inference_time = time.time() - start
-
-    #Try thresholds from the 95th to the 99th percentile of normal errors
-    rows = []
-    for pct in [95, 96, 97, 98, 99]:
-        row = evaluate_threshold(y_test, test_scores, np.percentile(val_errors, pct))
-        row["percentile"] = pct
-        rows.append(row)
-    sweep = pd.DataFrame(rows)[["percentile", "threshold", "accuracy",
-                                "precision", "recall", "f1"]]
-    print("\nPercentile sweep:")
-    print(sweep.round(4).to_string(index=False))
-
-    #Final threshold and its metrics
-    threshold = float(np.percentile(val_errors, THRESHOLD_PERCENTILE))
-    metrics = evaluate_threshold(y_test, test_scores, threshold)
-    auc = roc_auc_score(y_test, test_scores)         #does not depend on the threshold
-    print(f"\nChosen percentile: {THRESHOLD_PERCENTILE} | threshold: {threshold:.6f}")
-    print({k: round(v, 4) for k, v in metrics.items()}, f"ROC-AUC: {auc:.4f}")
-
-    per_attack_type_report(test_scores, threshold,
-                           os.path.join(OUT_DIR, "autoencoder_per_attack_type.csv"))
-
-    #Save everything Score order matches test_mixed.csv row order
-    np.save(os.path.join(OUT_DIR, "scores_autoencoder.npy"), test_scores)
-    np.save(os.path.join(OUT_DIR, "y_test.npy"), y_test)
-    model.save(os.path.join(OUT_DIR, "autoencoder.keras"))
-    sweep.to_csv(os.path.join(OUT_DIR, "autoencoder_percentile_sweep.csv"), index=False)
-    plot_loss(history, os.path.join(OUT_DIR, "autoencoder_loss_curve.png"))
-
-    with open(os.path.join(OUT_DIR, "autoencoder_threshold.json"), "w") as f:
-        json.dump({
-            "percentile": THRESHOLD_PERCENTILE,
-            "threshold": threshold,
-            "roc_auc": auc,
-            "metrics_at_threshold": metrics,
-            "epochs_run": epochs_run,
-            "train_time_sec": train_time,           #for Member 5's efficiency table
-            "inference_time_sec": inference_time,
-            "n_test_samples": int(len(X_test)),
-            "n_parameters": int(model.count_params()),   #model size
-            "n_features": len(feature_cols),
-            "feature_names": feature_cols,
-            "seed": SEED,
-        }, f, indent=2)
-
-    print(f"\nSaved outputs to ./{OUT_DIR}/")
-
-
-if __name__ == "__main__":
-    main()
+print("\nSaved files:")
+print("outputs/scores_autoencoder.npy")
+print("outputs/y_test.npy")
+print("outputs/y_pred_autoencoder.npy")
+print("outputs/autoencoder.keras")
+print("outputs/threshold_results.csv")
+print("outputs/per_attack_results_autoencoder.csv")
+print("outputs/autoencoder_training_history.csv")
+print("\nAutoencoder completed successfully.")
