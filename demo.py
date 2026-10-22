@@ -1,4 +1,5 @@
-﻿"""
+
+"""
 demo.py
 Loads the saved model and tests a few IoT records.
 """
@@ -8,34 +9,39 @@ from pathlib import Path
 import joblib
 import pandas as pd
 
+
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data" / "processed"
 MODEL_PATH = BASE_DIR / "isolation_forest_model.joblib"
 
 
 def load_model():
-    """Load the model that was trained earlier."""
+    """Load the saved model."""
     if not MODEL_PATH.exists():
-        raise FileNotFoundError(f"Saved model not found: {MODEL_PATH}")
+        raise FileNotFoundError(
+            f"Saved model not found: {MODEL_PATH}"
+        )
 
     return joblib.load(MODEL_PATH)
 
 
 def run_demo(sample_size=10):
-    """Show the model's predictions for a few test records."""
+    """Show predictions for a few test records."""
     model = load_model()
     test_path = DATA_DIR / "test_mixed.csv"
 
     if not test_path.exists():
-        raise FileNotFoundError(f"Test data not found: {test_path}")
+        raise FileNotFoundError(
+            f"Test data not found: {test_path}"
+        )
 
     test_data = pd.read_csv(test_path)
 
-    # Keep the feature columns and leave the actual labels out of the model.
+    # Keep the actual labels separate from the model input.
     X_test = test_data.drop(columns=["Label"])
     X_sample = X_test.head(sample_size)
 
-    # The model uses -1 for an anomaly and 1 for a normal record.
+    # The model marks anomalies as -1 and normal records as 1.
     predictions = model.predict(X_sample)
 
     results = pd.DataFrame({
