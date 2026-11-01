@@ -1,0 +1,2 @@
+training_time_seconds,epochs_completed,threshold_percentile,threshold,accuracy,balanced_accuracy,precision,recall,f1_score,roc_auc
+52.34554696083069,100,95,0.011082207784056664,0.58704,0.58704,0.8387297633872977,0.21552,0.3429226069246436,0.712531712
