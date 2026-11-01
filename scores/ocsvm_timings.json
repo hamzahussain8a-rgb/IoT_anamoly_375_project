@@ -1,0 +1,8 @@
+{
+  "train_time_s": 10.02,
+  "infer_time_s": 4.412,
+  "model_size_kb": 1352.4,
+  "nu": 0.2,
+  "n_train": 25000,
+  "n_test": 12500
+}
