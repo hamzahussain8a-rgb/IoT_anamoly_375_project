@@ -1,0 +1,2 @@
+selected_bottleneck_size,training_time_seconds,epochs_completed,threshold_percentile,threshold
+8,116.68414950370789,245,95,0.07588018476963043
